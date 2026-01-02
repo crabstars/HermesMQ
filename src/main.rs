@@ -2,11 +2,13 @@ mod client;
 mod message;
 
 use std::{
+    collections::HashMap,
     io::Write,
     net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
     time::Duration,
 };
+
 /*
 * Learnings
 * we need to decide to keep open or close,
@@ -29,16 +31,26 @@ use std::{
 * hello
 */
 
+type TopicMap = HashMap<String, Vec<std::sync::mpsc::Sender<String>>>;
+
 fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:8080")?;
     let active_streams: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
+    let channel_topic_map: Arc<Mutex<TopicMap>> = Arc::new(Mutex::new(TopicMap::new()));
     ping_listeners(Arc::clone(&active_streams));
 
     for stream in listener.incoming() {
-        let mut stream = stream.unwrap();
+        let mut stream = match stream {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("error from incomming tcp stream: {}", e);
+                continue;
+            }
+        };
         let streams = active_streams.clone();
+        let map = channel_topic_map.clone();
         std::thread::spawn(move || {
-            if let Err(e) = client::handle_client(stream.try_clone().unwrap(), streams) {
+            if let Err(e) = client::handle_client(&mut stream, streams, map) {
                 // TODO: add specific error message
                 eprintln!("client handle error {e}");
                 let _ = stream.write_all(b"Error occured while connecting");
@@ -52,7 +64,13 @@ fn ping_listeners(listener: Arc<Mutex<Vec<TcpStream>>>) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(4));
-            let mut listener_guard = listener.lock().unwrap();
+            let mut listener_guard = match listener.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    eprintln!("Skip ping, because error while locking listener");
+                    continue;
+                }
+            };
 
             println!("Currently {} active listener", listener_guard.len());
             // iterate backwards because if we remove the first one then we get an error for the second one
