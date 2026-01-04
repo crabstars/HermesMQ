@@ -90,7 +90,9 @@ fn serve_pub(
         }
         let mut map = match channel_topic_map.lock() {
             Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
+            Err(_) => {
+                continue;
+            }
         };
 
         let senders = map.entry(topic.clone()).or_default();

@@ -1,8 +1,4 @@
-mod client;
-mod message;
-
 use std::{
-    collections::HashMap,
     io::Write,
     net::{TcpListener, TcpStream},
     sync::{Arc, Mutex},
@@ -31,7 +27,7 @@ use std::{
 * hello
 */
 
-type TopicMap = HashMap<String, Vec<std::sync::mpsc::Sender<String>>>;
+use HermesMQ::{self, TopicMap, client};
 
 fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:8080")?;
