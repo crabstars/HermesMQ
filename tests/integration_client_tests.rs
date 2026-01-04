@@ -46,17 +46,18 @@ fn handle_client_pub_and_sub_to_server_test() {
     let active_streams = Arc::new(Mutex::new(Vec::new()));
     let channel_topic_map = Arc::new(Mutex::new(TopicMap::new()));
 
-    let server = thread::spawn({
+    let mut client_sub = TcpStream::connect(addr).expect("client failed to connect to server");
+    let (mut sub_stream, _) = listener
+        .accept()
+        .expect("failed to accept subscriber connection");
+    let sub_handle = thread::spawn({
         let active_streams = active_streams.clone();
         let channel_topic_map = channel_topic_map.clone();
         move || {
-            let (mut stream, _) = listener.accept().expect("failed to accept connection");
-            handle_client(&mut stream, active_streams, channel_topic_map)
-                .expect("handle_client should not error for Ack");
+            handle_client(&mut sub_stream, active_streams, channel_topic_map)
+                .expect("handle_client should not error for Sub");
         }
     });
-
-    let mut client_sub = TcpStream::connect(addr).expect("client failed to connect to server");
     client_sub
         .write_all(br#"{"command":"Sub","version":1,"topic":"chat.general","payload":"hello"}"#)
         .expect("Failed Sub command");
@@ -66,6 +67,17 @@ fn handle_client_pub_and_sub_to_server_test() {
 
     thread::sleep(Duration::from_millis(100));
     let mut client_pub = TcpStream::connect(addr).expect("client failed to connect to server");
+    let (mut pub_stream, _) = listener
+        .accept()
+        .expect("failed to accept publisher connection");
+    let pub_handle = thread::spawn({
+        let active_streams = active_streams.clone();
+        let channel_topic_map = channel_topic_map.clone();
+        move || {
+            handle_client(&mut pub_stream, active_streams, channel_topic_map)
+                .expect("handle_client should not error for Pub");
+        }
+    });
     client_pub
         .write_all(
             b"{\"command\":\"Pub\",\"version\":1,\"topic\":\"chat.general\",\"payload\":\"hello\"}",
@@ -88,5 +100,10 @@ fn handle_client_pub_and_sub_to_server_test() {
 
     drop(client_pub);
     drop(client_sub);
-    server.join().expect("server thread panicked")
+    channel_topic_map
+        .lock()
+        .expect("lock topic map")
+        .clear();
+    pub_handle.join().expect("publisher thread panicked");
+    sub_handle.join().expect("subscriber thread panicked");
 }
