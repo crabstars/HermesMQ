@@ -31,7 +31,7 @@ use HermesMQ::{self, TopicMap, client};
 
 fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:8080")?;
-    let active_streams: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
+    let active_streams: Arc<Mutex<Vec<Arc<Mutex<TcpStream>>>>> = Arc::new(Mutex::new(Vec::new()));
     let channel_topic_map: Arc<Mutex<TopicMap>> = Arc::new(Mutex::new(TopicMap::new()));
     ping_listeners(Arc::clone(&active_streams));
 
@@ -45,8 +45,14 @@ fn main() -> std::io::Result<()> {
         };
         let streams = active_streams.clone();
         let map = channel_topic_map.clone();
+        let client_stream = match stream.try_clone() {
+            Ok(s) => s,
+            Err(_) => {
+                continue;
+            }
+        };
         std::thread::spawn(move || {
-            if let Err(e) = client::handle_client(&mut stream, streams, map) {
+            if let Err(e) = client::handle_client(client_stream, streams, map) {
                 // TODO: add specific error message
                 eprintln!("client handle error {e}");
                 let _ = stream.write_all(b"Error occured while connecting");
@@ -56,7 +62,7 @@ fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-fn ping_listeners(listener: Arc<Mutex<Vec<TcpStream>>>) {
+fn ping_listeners(listener: Arc<Mutex<Vec<Arc<Mutex<TcpStream>>>>>) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(Duration::from_secs(4));
@@ -71,13 +77,15 @@ fn ping_listeners(listener: Arc<Mutex<Vec<TcpStream>>>) {
             println!("Currently {} active listener", listener_guard.len());
             // iterate backwards because if we remove the first one then we get an error for the second one
             for i in (0..listener_guard.len()).rev() {
-                let res = listener_guard[i].write_all(b"ping\n");
-                match res {
-                    Ok(_) => continue,
+                let stream_arc = Arc::clone(&listener_guard[i]);
+                let mut stream = match stream_arc.lock() {
+                    Ok(guard) => guard,
                     Err(_) => {
-                        listener_guard.remove(i);
                         continue;
                     }
+                };
+                if stream.write_all(b"ping\n").is_err() {
+                    listener_guard.remove(i);
                 }
             }
         }

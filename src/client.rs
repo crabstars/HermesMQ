@@ -13,13 +13,12 @@ use crate::{
 };
 
 pub fn handle_client(
-    stream: &mut TcpStream,
-    active_streams: Arc<Mutex<Vec<TcpStream>>>,
+    stream: TcpStream,
+    active_streams: Arc<Mutex<Vec<Arc<Mutex<TcpStream>>>>>,
     channel_topic_map: Arc<Mutex<TopicMap>>,
 ) -> std::io::Result<()> {
     println!("Incomming stream");
-    let reader_stream = stream.try_clone()?;
-    let mut reader = BufReader::new(reader_stream);
+    let mut reader = BufReader::new(stream);
     let mut message = String::new();
     reader.read_line(&mut message)?;
     let m: Message = serde_json::from_str(&message)?;
@@ -28,33 +27,35 @@ pub fn handle_client(
         Command::Sub => {
             let (tx, rx): (Sender<String>, Receiver<String>) = mpsc::channel();
             {
-                match channel_topic_map.lock() {
-                    Ok(mut topic_map) => topic_map.entry(m.topic.clone()).or_default().push(tx),
+                let mut topic_map = match channel_topic_map.lock() {
+                    Ok(guard) => guard,
                     Err(_) => {
-                        eprintln!(
-                            "Error while locking ChannelTopicMap for adding Sender. Closing connection."
-                        );
+                        eprintln!("Error locking ChannelTopicMap; closing connection.");
                         return Ok(());
                     }
-                }
+                };
+                topic_map.entry(m.topic.clone()).or_default().push(tx);
             }
 
             println!("Adding Sub");
+
+            let stream = reader.into_inner();
+            let shared_stream = Arc::new(Mutex::new(stream));
+
             match active_streams.lock() {
-                Ok(mut streams) => streams.push(stream.try_clone()?),
-                Err(_) => {
-                    eprintln!(
-                        "Error while locking ActiveStreams when adding new stream. Closing connection."
-                    )
-                }
+                Ok(mut streams) => streams.push(Arc::clone(&shared_stream)),
+                Err(_) => eprintln!(
+                    "Error while locking ActiveStreams when adding new stream. Closing connection."
+                ),
             }
-            serve_sub(stream, rx)?;
+            serve_sub(shared_stream, rx)?;
         }
         Command::Pub => {
             println!("Adding Pub");
             serve_pub(reader, channel_topic_map.clone(), m.topic)?;
         }
         _ => {
+            let stream = reader.get_mut();
             stream.write_all(b"command not valid right now\n")?;
             return Ok(());
         }
@@ -62,11 +63,19 @@ pub fn handle_client(
     Ok(())
 }
 
-fn serve_sub(stream: &mut TcpStream, receiver: Receiver<String>) -> std::io::Result<()> {
+fn serve_sub(stream: Arc<Mutex<TcpStream>>, receiver: Receiver<String>) -> std::io::Result<()> {
     loop {
-        let res = receiver.recv();
-        match res {
-            Ok(msg) => stream.write_all(msg.as_bytes())?,
+        match receiver.recv() {
+            Ok(msg) => {
+                let mut guard = match stream.lock() {
+                    Ok(g) => g,
+                    Err(_) => {
+                        eprintln!("Sub: stream mutex poisoned");
+                        break;
+                    }
+                };
+                guard.write_all(msg.as_bytes())?;
+            }
             Err(_) => {
                 eprintln!("Error while receiving");
                 break;
